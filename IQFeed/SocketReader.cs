@@ -12,6 +12,7 @@ namespace IQFeed
 	{
 		private Socket _socket;
 		public StringCallback Callback { get; set; }
+        public Action<Exception> ExceptionCallback { get; set; }
 		private StateObject _state = new StateObject();
 		List<byte> _pendingBytes = new List<byte>();
 
@@ -30,7 +31,25 @@ namespace IQFeed
 		{
 			if (_socket.Connected)
 			{
-				int bytesRead = _socket.EndReceive(ar);
+				int bytesRead;
+                try
+                {
+                    bytesRead = _socket.EndReceive(ar);
+                }
+                catch (Exception ex)
+                {
+                    if (ExceptionCallback != null)
+                    {
+                        ExceptionCallback(ex);
+                        _socket.Close();
+                        return;
+                    }
+                    else
+                    {
+                        throw;
+                    }
+                }
+
 
 				bool bContinue = true;
 
@@ -59,6 +78,10 @@ namespace IQFeed
 				{
 					Begin();
 				}
+                else
+                {
+                    _socket.Close();
+                }
 			}
 			
 		}

@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.Text;
 using System.IO;
+using System.Linq;
 
 using WriteWrapper = RightEdge.DataStorage.CloseWrapper<System.IO.BinaryWriter>;
 using ReadWrapper = RightEdge.DataStorage.CloseWrapper<System.IO.BinaryReader>;
@@ -83,6 +84,9 @@ namespace RightEdge.DataStorage
 					}
 
 					return ReadItems(br, seekStart, seekLength);
+
+					//	This is how you can filter out data outside of market hours
+					//return ReadItems(br, seekStart, seekLength).Where(item => GetTime(item).TimeOfDay.TotalHours > 9.5 && GetTime(item).TimeOfDay.TotalHours < 16).ToList();
 				}
 			}
 

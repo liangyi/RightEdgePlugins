@@ -13,6 +13,7 @@ using RightEdge.Shared;
 using System.Data.SqlClient;
 using System.IO;
 using System.Data;
+using System.Data.SqlTypes;
 
 namespace RightEdge.DataStorage
 {
@@ -428,9 +429,6 @@ GO";
 
 	abstract class LinqToSQLDataAccessor<T, DBType> : IDataAccessor<T>
 	{
-		private readonly DateTime MinSQLDate = System.Data.SqlTypes.SqlDateTime.MinValue.Value;
-		private readonly DateTime MaxSQLDate = System.Data.SqlTypes.SqlDateTime.MaxValue.Value;
-
 		string _connectionString;
 
 		protected Symbol _symbol;
@@ -471,7 +469,7 @@ GO";
 
 
 		//protected abstract IQueryable<DBType> Items { get; }
-		protected abstract IQueryable<DBType> GetItemsByDate(SQLDataContext context, DateTime start, DateTime end);
+		protected abstract IQueryable<DBType> GetItemsByDate(SQLDataContext context, SqlDateTime start, SqlDateTime end);
 
 		protected abstract DateTime GetItemTime(T item);
 
@@ -486,27 +484,19 @@ GO";
 
 		protected abstract string TableName { get; }
 
-		protected DateTime MakeValidSQLDate(DateTime date)
+		protected SqlDateTime MakeValidSQLDate(DateTime date, bool roundUp)
 		{
-			if (date < MinSQLDate)
-			{
-				return MinSQLDate;
-			}
-			else if (date > MaxSQLDate)
-			{
-				return MaxSQLDate;
-			}
-			return date;
+			return SqlDateUtil.MakeValidSQLDate(date, roundUp);
 		}
 
 		public List<T> Load(DateTime start, DateTime end, long maxItems, bool loadFromEnd)
 		{
 			using (var context = GetContext())
 			{
-				start = MakeValidSQLDate(start);
-				end = MakeValidSQLDate(end);
+				var SqlStart = MakeValidSQLDate(start, true);
+				var SqlEnd = MakeValidSQLDate(end, false);
 
-				IQueryable<DBType> itemQuery = GetItemsByDate(context, start, end);
+				IQueryable<DBType> itemQuery = GetItemsByDate(context, SqlStart, SqlEnd);
 				if (maxItems > 0)
 				{
 					if (loadFromEnd)
@@ -539,11 +529,11 @@ GO";
 
 		public long GetCount(DateTime start, DateTime end)
 		{
-			start = MakeValidSQLDate(start);
-			end = MakeValidSQLDate(end);
+			var SqlStart = MakeValidSQLDate(start, true);
+			var SqlEnd = MakeValidSQLDate(end, false);
 			using (var context = GetContext())
 			{
-				return GetItemsByDate(context, start, end).LongCount();
+				return GetItemsByDate(context, SqlStart, SqlEnd).LongCount();
 			}
 
 		}
@@ -614,17 +604,25 @@ GO";
 
 		IQueryable<DBBar> GetItems(SQLDataContext context)
 		{
-			return context.DBBars.Where(b => b.DBSymbol.SymbolUniqueID == _symbolUniqueID && b.Frequency == _frequency).OrderBy(b => b.BarStartTime).ThenBy(b => b.Order);
+            var dbSymbol = GetSymbol(context, false);
+            if (dbSymbol == null)
+            {
+                return Enumerable.Empty<DBBar>().AsQueryable();
+            }
+
+            return context.DBBars.Where(b => b.SymbolGuid == dbSymbol.SymbolGuid && b.Frequency == _frequency).OrderBy(b => b.BarStartTime).ThenBy(b => b.Order);
+
+			//return context.DBBars.Where(b => b.DBSymbol.SymbolUniqueID == _symbolUniqueID && b.Frequency == _frequency).OrderBy(b => b.BarStartTime).ThenBy(b => b.Order);
 		}
 
-		protected override IQueryable<DBBar> GetItemsByDate(SQLDataContext context, DateTime start, DateTime end)
+		protected override IQueryable<DBBar> GetItemsByDate(SQLDataContext context, SqlDateTime start, SqlDateTime end)
 		{
-			return GetItems(context).Where(b => b.BarStartTime >= start && b.BarStartTime <= end);
+			return GetItems(context).Where(b => b.BarStartTime >= start.Value && b.BarStartTime <= end.Value);
 		}
 
 		protected override DateTime GetItemTime(BarData item)
 		{
-			return item.BarStartTime;
+			return MakeValidSQLDate(item.BarStartTime, false).Value;
 		}
 
 		protected override BarData ConvertToRightEdgeType(DBBar dbBar)
@@ -716,7 +714,7 @@ GO";
 
 				drb.SymbolGuid = symbolGuid;
 				drb.Frequency = _frequency;
-				drb.BarStartTime = b.BarStartTime;
+				drb.BarStartTime = MakeValidSQLDate(b.BarStartTime, false).Value;
 				drb.Order = order;
 				drb.Open = b.Open;
 				drb.Close = b.Close;
@@ -736,8 +734,8 @@ GO";
 		//	TODO: Figure out how to make the Stored procedure call part of the transaction, so that when saving, the delete/add is part of the same transaction
 		protected override void InternalDelete(DateTime start, DateTime end)
 		{
-			start = MakeValidSQLDate(start);
-			end = MakeValidSQLDate(end);
+			var SqlStart = MakeValidSQLDate(start, true);
+			var SqlEnd = MakeValidSQLDate(end, false);
 			using (var context = GetContext())
 			{
 				DBSymbol dbSymbol = GetSymbol(context, false);
@@ -748,7 +746,7 @@ GO";
 				}
 				using (new TimeOperation("Delete bars"))
 				{
-					context.DeleteBars(dbSymbol.SymbolGuid, _frequency, start, end);
+					context.DeleteBars(dbSymbol.SymbolGuid, _frequency, SqlStart.Value, SqlEnd.Value);
 				}
 			}
 			//Context.DBBars.DeleteAllOnSubmit(BarsForSymbol.Where(b => b.BarStartTime >= start && b.BarStartTime <= end));
@@ -775,17 +773,25 @@ GO";
 
 		IQueryable<DBTick> GetItems(SQLDataContext context)
 		{
-			return context.DBTicks.Where(t => t.DBSymbol.SymbolUniqueID == _symbolUniqueID).OrderBy(t => t.Time).ThenBy(t => t.Order);
+            var dbSymbol = GetSymbol(context, false);
+            if (dbSymbol == null)
+            {
+                return Enumerable.Empty<DBTick>().AsQueryable();
+            }
+
+            return context.DBTicks.Where(t => t.SymbolGuid == dbSymbol.SymbolGuid).OrderBy(t => t.Time).ThenBy(t => t.Order);
+
+			//return context.DBTicks.Where(t => t.DBSymbol.SymbolUniqueID == _symbolUniqueID).OrderBy(t => t.Time).ThenBy(t => t.Order);
 		}
 
-		protected override IQueryable<DBTick> GetItemsByDate(SQLDataContext context, DateTime start, DateTime end)
+		protected override IQueryable<DBTick> GetItemsByDate(SQLDataContext context, SqlDateTime start, SqlDateTime end)
 		{
-			return GetItems(context).Where(t => t.Time >= start && t.Time <= end);
+			return GetItems(context).Where(t => t.Time >= start.Value && t.Time <= end.Value);
 		}
 
 		protected override DateTime GetItemTime(TickData item)
 		{
-			return item.time;
+			return MakeValidSQLDate(item.time, false).Value;
 		}
 
 		protected override TickData ConvertToRightEdgeType(DBTick dbTick)
@@ -843,7 +849,12 @@ GO";
 			int order = 0;
 			foreach (var t in ticks)
 			{
-				if (t.time == lastDate)
+				var drt = new DataReaderTick();
+
+				drt.SymbolGuid = symbolGuid;
+				drt.Time = MakeValidSQLDate(t.time, false).Value;
+
+				if (drt.Time == lastDate)
 				{
 					order++;
 				}
@@ -852,17 +863,16 @@ GO";
 					order = 0;
 				}
 
-				var drt = new DataReaderTick();
 
-				drt.SymbolGuid = symbolGuid;
-				drt.Time = t.time;
 				drt.Order = order;
 				drt.TickType = (int)t.tickType;
 				drt.Price = t.price;
 				drt.Size = (long)t.size;
 
+				//Trace.WriteLine("Yielding tick: " + Util.FormatTimeStamp(drt.Time) + " " + drt.Order + " " + t.tickType + " " + drt.Price + " " + drt.Size);
 				yield return drt;
-				lastDate = t.time;
+
+				lastDate = drt.Time;
 			}
 		}
 
@@ -870,8 +880,9 @@ GO";
 		//	TODO: Figure out how to make the Stored procedure call part of the transaction, so that when saving, the delete/add is part of the same transaction
 		protected override void InternalDelete(DateTime start, DateTime end)
 		{
-			start = MakeValidSQLDate(start);
-			end = MakeValidSQLDate(end);
+			var SqlStart = MakeValidSQLDate(start, true);
+			var SqlEnd = MakeValidSQLDate(end, false);
+
 			using (var context = GetContext())
 			{
 				DBSymbol dbSymbol = GetSymbol(context, false);
@@ -882,7 +893,7 @@ GO";
 				}
 				using (new TimeOperation("Delete ticks"))
 				{
-					context.DeleteTicks(dbSymbol.SymbolGuid, start, end);
+					context.DeleteTicks(dbSymbol.SymbolGuid, SqlStart.Value, SqlEnd.Value);
 				}
 			}
 		}

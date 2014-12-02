@@ -268,6 +268,19 @@ namespace IQFeed
 							}
 
 							break;
+						case 32:
+							//	Extended trading last
+							if (!string.IsNullOrEmpty(value))
+							{
+								if (double.TryParse(value, NumberStyles.Number, NumberFormatInfo.InvariantInfo, out outVal))
+								{
+									if (level1Data.UpdateType == UpdateType.ExtendedTradeUpdate)
+									{
+										level1Data.LastPrice = outVal;
+									}
+								}
+							}
+							break;
 					}
 				}
 				catch (FormatException ex)

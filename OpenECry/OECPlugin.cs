@@ -37,6 +37,8 @@ namespace OpenECry
 
 		#region IService Members
 
+		public event EventHandler<ServiceEventArgs> ServiceEvent;
+
 		public string ServiceName()
 		{
 			return "Open E-Cry";
@@ -234,6 +236,11 @@ namespace OpenECry
 			}
 
 			return CheckError();
+		}
+
+		public void SyncAccountState()
+		{
+
 		}
 
 		public bool Disconnect()
@@ -1108,15 +1115,10 @@ namespace OpenECry
 			return oecClient.Accounts.First.TotalBalance.NetLiquidatingValue - oecClient.Accounts.First.TotalBalance.SettlePnL;
 		}
 
-		public double GetMargin()
-		{
-			return 0.0;
-		}
-
-		public double GetShortedCash()
-		{
-			return 0.0;
-		}
+        public double GetAccountBalance()
+        {
+            return GetBuyingPower();
+        }
 
 		//public void SetBuyingPower(double value)
 		//{
@@ -1169,6 +1171,11 @@ namespace OpenECry
 		public bool IsLiveBroker()
 		{
 			return true;
+		}
+
+		public object CustomMessage(string type, object data)
+		{
+            return null;
 		}
 
 		//public void SimBar(Dictionary<Symbol, BarData> bars)

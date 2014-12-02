@@ -1,11 +1,14 @@
 ﻿-- Converts symbols that exist in the BarData 
-INSERT INTO [NEW_DATABASE].dbo.Symbol (SymbolGuid, SymbolUniqueID)
-SELECT
-NEWID() as SymbolGuid,
+SELECT DISTINCT
 SUBSTRING(SymbolID, 0, LEN(SymbolID) - CHARINDEX('!', REVERSE(SymbolID)) + 1) As SymbolID
+INTO #temp_symbols
 FROM [OLD_DATABASE].[dbo].[BarData]
+Order by SymbolID
+GO
+
+INSERT INTO [NEW_DATABASE].dbo.Symbol (SymbolGuid, SymbolUniqueID)
+SELECT NEWID() As SymbolGuid, SymbolId FROM #temp_symbols
 WHERE SymbolID NOT IN (SELECT SymbolUniqueID FROM [NEW_DATABASE].dbo.Symbol)
-GROUP BY SymbolID
 GO
 
 -- Converts symbols that exist in the TickData

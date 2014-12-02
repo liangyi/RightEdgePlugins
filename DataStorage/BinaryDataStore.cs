@@ -76,6 +76,8 @@ namespace RightEdge.DataStorage
 
 		private string GetTickFileName(Symbol symbol)
 		{
+			EnsureDataDir();
+
 			string validFileName = symbol.ToUniqueId();
 			char[] invalidFileChars = Path.GetInvalidFileNameChars();
 

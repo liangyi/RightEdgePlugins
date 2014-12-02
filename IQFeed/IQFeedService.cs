@@ -7,8 +7,10 @@ using System.Threading;
 using System.Diagnostics;
 using System.Collections.Generic;
 using System.Windows.Forms;
+using System.Linq;
 
 using RightEdge.Common;
+using Serilog;
 
 namespace IQFeed
 {
@@ -24,8 +26,79 @@ namespace IQFeed
 		//private ManualResetEvent connectDone = new ManualResetEvent(false);
 		private Dictionary<string, Symbol> symbolMapping = new Dictionary<string, Symbol>();
 		private DateTime lastGoodTickTime = DateTime.MinValue;
-		private DateTime _currentTickTime;
-		private bool dropLastHistBar = false;
+		private DateTime _lastTickTime;
+
+        public class Settings
+        {
+            public bool EnableLogging { get; set; }
+            public bool IgnoreLastHistBar { get; set; }
+            public bool FilterUsingCurrentTime { get; set; }
+            //  Difference between exchange time and local time
+            public TimeSpan ExchangeTimeDiff { get; set; }
+            public TimeSpan MaxTimeDelta { get; set; }
+
+            public Settings()
+            {
+                EnableLogging = true;
+                MaxTimeDelta = TimeSpan.FromMinutes(40);
+            }
+
+            public void SaveTo(IDictionary<string, string> dict)
+            {
+                dict["EnableLogging"] = EnableLogging.ToString();
+                dict["IgnoreLastHistBar"] = IgnoreLastHistBar.ToString();
+                dict["FilterUsingCurrentTime"] = FilterUsingCurrentTime.ToString();
+                dict["ExchangeTimeDiff"] = ExchangeTimeDiff.ToString("c");
+                dict["MaxTimeDelta"] = MaxTimeDelta.ToString("c");
+            }
+
+            public void LoadFrom(IDictionary<string, string> settings)
+            {
+                string enableLogging;
+                if (settings.TryGetValue("EnableLogging", out enableLogging))
+                {
+                    EnableLogging = Convert.ToBoolean(enableLogging);
+                }
+                string ignorelast;
+                if (settings.TryGetValue("IgnoreLastHistBar", out ignorelast))
+                {
+                    IgnoreLastHistBar = Convert.ToBoolean(ignorelast);
+                }
+                string filterUsingCurrentTime;
+                if (settings.TryGetValue("FilterUsingCurrentTime", out filterUsingCurrentTime))
+                {
+                    FilterUsingCurrentTime = Convert.ToBoolean(filterUsingCurrentTime);
+                }
+                string exchangeTimeDiff;
+                if (settings.TryGetValue("ExchangeTimeDiff", out exchangeTimeDiff))
+                {
+                    TimeSpan ts;
+                    if (TimeSpan.TryParse(exchangeTimeDiff, out ts))
+                    {
+                        ExchangeTimeDiff = ts;
+                    }
+                }
+                string maxTimeDelta;
+                if (settings.TryGetValue("MaxTimeDelta", out maxTimeDelta))
+                {
+                    TimeSpan ts;
+                    if (TimeSpan.TryParse(maxTimeDelta, out ts))
+                    {
+                        MaxTimeDelta = ts;
+                    }
+                }
+            }
+
+            public Settings Clone()
+            {
+                return (Settings)this.MemberwiseClone();
+            }
+        }
+
+        private Settings _settings = new Settings();
+        
+        
+        Serilog.ILogger _logger;
 
 		#region ITickRetrieval Members
 
@@ -101,6 +174,8 @@ namespace IQFeed
 
 		#region IService Members
 
+		public event EventHandler<ServiceEventArgs> ServiceEvent;
+
 		public string ServiceName()
 		{
 			return "IQFeed";
@@ -143,7 +218,7 @@ namespace IQFeed
 
 		public bool NeedsAuthentication()
 		{
-			return false;
+			return true;
 		}
 
 		public bool SupportsMultipleInstances()
@@ -173,27 +248,9 @@ namespace IQFeed
 			}
 		}
 
-		public string UserName
-		{
-			get
-			{
-				return "";
-			}
-			set
-			{
-			}
-		}
+		public string UserName { get; set; }
 
-		public string Password
-		{
-			get
-			{
-				return "";
-			}
-			set
-			{
-			}
-		}
+		public string Password { get; set; }
 
 		public bool BarDataAvailable
 		{
@@ -242,16 +299,13 @@ namespace IQFeed
 		public bool ShowCustomSettingsForm(ref SerializableDictionary<string, string> settings)
 		{
 			IQFeedSettings dlg = new IQFeedSettings();
-			string ignorelast = "";
 
-			if (settings.TryGetValue("IgnoreLastHistBar", out ignorelast))
-			{
-				dlg.IgnoreLastHistBar = Convert.ToBoolean(ignorelast);
-			}
+            dlg.Settings = _settings.Clone();
+            dlg.Settings.LoadFrom(settings);
 
 			if (dlg.ShowDialog() == System.Windows.Forms.DialogResult.OK)
 			{
-				settings["IgnoreLastHistBar"] = dlg.IgnoreLastHistBar.ToString();
+                dlg.Settings.SaveTo(settings);
 			}
 
 			return true;
@@ -259,11 +313,34 @@ namespace IQFeed
 
 		public bool Initialize(SerializableDictionary<string, string> settings)
 		{
-			string ignorelast;
-			if (settings.TryGetValue("IgnoreLastHistBar", out ignorelast))
-			{
-				dropLastHistBar = Convert.ToBoolean(ignorelast);
-			}
+            _settings.LoadFrom(settings);
+
+
+            var loggerConfig = new LoggerConfiguration();
+
+            loggerConfig.MinimumLevel.Debug();
+
+            Serilog.Events.LogEventLevel traceLevel = Serilog.Events.LogEventLevel.Debug;
+
+            if (_settings.EnableLogging)
+            {
+                string logPath;
+                if (!string.IsNullOrEmpty(CommonGlobals.UserAppDataPath))
+                {
+                    logPath = Path.Combine(CommonGlobals.UserAppDataPath, "IQFeedLogs");
+                }
+                else
+                {
+                    logPath = Path.Combine(Environment.CurrentDirectory, "IQFeedLogs");
+                }
+
+                loggerConfig.WriteTo.RollingFile(Path.Combine(logPath, "RightEdgeIQFeedLog-{Date}.txt"), retainedFileCountLimit: 30);
+
+                loggerConfig.WriteTo.ColoredConsole(restrictedToMinimumLevel: traceLevel);
+                loggerConfig.WriteTo.Trace(restrictedToMinimumLevel: traceLevel);
+            }
+
+            _logger = loggerConfig.CreateLogger();
 
 			return true;
 		}
@@ -271,22 +348,42 @@ namespace IQFeed
 		public bool Connect(ServiceConnectOptions connectOptions)
 		{
 			hadError = false;
+            lastError = string.Empty;
 
 			if (connected)
 				return true;
 
 			if (iqFeed == null)
 			{
-				if (!CreateIQFeed())
-				{
-					hadError = true;
-					lastError = "Error connecting to IQFeed.";
-				}
-				else
-				{
-					connected = true;
-				}
+                //if (!CreateIQFeed())
+                //{
+                //    hadError = true;
+                //    lastError = "Error connecting to IQFeed.";
+                //}
+                //else
+                //{
+                //    connected = true;
+                //}
+
+                iqFeed = new IQFeed();
+                iqFeed.IQSummaryMessage += new EventHandler<IQSummaryEventArgs>(iqFeed_IQSummaryMessage);
+                iqFeed.IQUpdateMessage += new EventHandler<IQSummaryEventArgs>(iqFeed_IQUpdateMessage);
+                iqFeed.IQTimeMessage += new EventHandler<IQTimeEventArgs>(iqFeed_IQTimeMessage);
+                iqFeed.Disconnected += iqFeed_Disconnected;
 			}
+
+            if (iqFeed.Connect(UserName, Password) && !hadError)
+            {
+                connected = true;
+            }
+            else
+            {
+                if (string.IsNullOrEmpty(lastError))
+                {
+                    lastError = "Unable to connect.";
+                }
+                return false;
+            }
 
 			return !hadError;
 		}
@@ -391,6 +488,7 @@ namespace IQFeed
 			if (e.SummaryMessage.Level1.LastTradeTime == DateTime.MinValue)
 			{
 				Console.WriteLine("UpdateMessage DateTime.MinValue encountered for tickType " + e.SummaryMessage.Level1.UpdateType.ToString());
+                _logger.Warning("UpdateMessage DateTime.MinValue encountered for tickType {TickType}", e.SummaryMessage.Level1.UpdateType.ToString());
 			}
 
 			switch (e.SummaryMessage.Level1.UpdateType)
@@ -421,6 +519,7 @@ namespace IQFeed
 					break;
 
 				case UpdateType.TradeUpdate:
+				case UpdateType.ExtendedTradeUpdate:
 					tick.tickType = TickType.Trade;
 					tick.size = e.SummaryMessage.Level1.LastSize;
 					tick.price = e.SummaryMessage.Level1.LastPrice;
@@ -435,7 +534,7 @@ namespace IQFeed
 			if (ticks.Count > 0)
 			{
 				Symbol symbol = symbolMapping[e.SummaryMessage.Level1.SymbolString];
-				ProcessTicks(symbol, ticks);
+				ProcessTicks(symbol, ticks, e.SummaryMessage.Message);
 			}
 		}
 
@@ -461,6 +560,7 @@ namespace IQFeed
 			if (e.SummaryMessage.Level1.LastTradeTime == DateTime.MinValue)
 			{
 				Console.WriteLine("Summary Message DateTime.MinValue encountered for tickType " + e.SummaryMessage.Level1.UpdateType.ToString());
+                _logger.Warning("Summary Message DateTime.MinValue encountered for tickType {TickType}", e.SummaryMessage.Level1.UpdateType.ToString());
 			}
 
 			if (e.SummaryMessage.Level1.LastTradeTime != DateTime.MinValue)
@@ -513,7 +613,7 @@ namespace IQFeed
 			ticks.Add(low);
 
 			Symbol symbol = symbolMapping[e.SummaryMessage.Level1.SymbolString];
-			ProcessTicks(symbol, ticks);
+			ProcessTicks(symbol, ticks, e.SummaryMessage.Message);
 
 		}
 
@@ -531,15 +631,12 @@ namespace IQFeed
 		{
 			ClearError();
 
-			if (iqFeed == null)
-			{
-				if (!CreateIQFeed())
-				{
-					lastError = "Unable to connect to IQFeed";
-					hadError = true;
-					return null;
-				}
-			}
+            if (!connected)
+            {
+                lastError = "Not connected";
+                hadError = true;
+                return null;
+            }
 
 			ReturnValue<List<BarData>> ret = iqFeed.GetHistoricalBarData(symbol, frequency, startDate, endDate);
 			if (!ret.Success)
@@ -559,7 +656,7 @@ namespace IQFeed
 				}
 			}
 
-			if (dropLastHistBar && bars.Count > 0)
+			if (_settings.IgnoreLastHistBar && bars.Count > 0)
 			{
 				bars.RemoveAt(bars.Count - 1);
 			}
@@ -569,55 +666,129 @@ namespace IQFeed
 
 		#endregion
 
-		private void ProcessTicks(Symbol symbol, List<TickData> ticks)
+        Dictionary<Symbol, DateTime> _lastLoggedTickTimes = new Dictionary<Symbol, DateTime>();
+        Dictionary<Symbol, DateTime> _lastLoggedTickLocalTimes = new Dictionary<Symbol, DateTime>();
+        bool _isOutOfOrder;
+
+		private void ProcessTicks(Symbol symbol, List<TickData> ticks, string rawMessage)
 		{
+            DateTime lastTickTime;
+            DateTime lastTickLocalTime;
+
+            if (!_lastLoggedTickTimes.TryGetValue(symbol, out lastTickTime))
+            {
+                lastTickTime = DateTime.MinValue;
+            }
+
+            if (!_lastLoggedTickLocalTimes.TryGetValue(symbol, out lastTickLocalTime))
+            {
+                lastTickLocalTime = DateTime.MinValue;
+            }
+
+            DateTime tickTime = ticks.First().time;
+            TimeSpan period = TimeSpan.FromMinutes(1);
+            if (tickTime - lastTickTime >= period ||
+                DateTime.Now - lastTickLocalTime >= period)
+            {
+                _lastLoggedTickTimes[symbol] = tickTime;
+                _lastLoggedTickLocalTimes[symbol] = DateTime.Now;
+
+                _logger.Information("{Symbol} {TickType} @{TickPrice} Time: {TickTime} Time diff: {TickTimeDiff} Raw Message: {RawMessage}",
+                    symbol, ticks.First().tickType, ticks.First().price, tickTime, tickTime - DateTime.Now , rawMessage);
+            }
+
 			if (tickListener != null)
 			{
 				foreach (TickData t in ticks)
 				{
 					TickData tick = t;
-					if (tick.time < _currentTickTime)
+
+                    if (_settings.FilterUsingCurrentTime && (tick.time - DateTime.Now) > (_settings.ExchangeTimeDiff + _settings.MaxTimeDelta))
+                    {
+                        _logger.Warning("Filtered tick due to future timestamp: {Symbol} {TickType} @{TickPrice} Time: {TickTime}", symbol, ticks.First().tickType, ticks.First().price, tick.time);
+                        continue;
+                    }
+
+					if (tick.time < _lastTickTime)
 					{
-						//	Avoid sending out of order ticks
-						tick.time = _currentTickTime;
+                        if (!_isOutOfOrder)
+                        {
+                            _isOutOfOrder = true;
+                            _logger.Warning("Out of order tick: {Symbol} {TickType} @{TickPrice} Time: {TickTime}", symbol, ticks.First().tickType, ticks.First().price, tickTime);
+                        }
+
+                        //  Summary messages look like they use the timestamp of the last tick for a symbol, so they may not be in order
+                        if (rawMessage.StartsWith("P,"))
+                        {
+                            _logger.Information("Adjusting summary message tick time from {RecievedTickTime} to {AdjustedTickTime} for symbol {Symbol}", tick.time, _lastTickTime, symbol);
+                            //	Avoid sending out of order ticks for summary messages
+                            tick.time = _lastTickTime;
+                        }
 					}
 					else
 					{
-						_currentTickTime = tick.time;
+						_lastTickTime = tick.time;
+                        _isOutOfOrder = false;
 					}
-					tickListener(symbol, tick);
+
+                    tickListener(symbol, tick);					
 				}
 			}
 		}
 
-		private bool CreateIQFeed()
-		{
-			bool success = true;
+        private bool CreateIQFeed()
+        {
+            bool success = true;
 
-			iqFeed = new IQFeed();
-			//iqFeed.IQStatusChanged += new EventHandler<IQFeedEventArgs>(iqFeed_IQStatusChanged);
-			if (iqFeed.Connect())
-			{
-				iqFeed.IQSummaryMessage += new EventHandler<IQSummaryEventArgs>(iqFeed_IQSummaryMessage);
-				iqFeed.IQUpdateMessage += new EventHandler<IQSummaryEventArgs>(iqFeed_IQUpdateMessage);
-				iqFeed.IQTimeMessage += new EventHandler<IQTimeEventArgs>(iqFeed_IQTimeMessage);
+            iqFeed = new IQFeed();
+            //iqFeed.IQStatusChanged += new EventHandler<IQFeedEventArgs>(iqFeed_IQStatusChanged);
+            if (iqFeed.Connect(UserName, Password))
+            {
+                iqFeed.IQSummaryMessage += new EventHandler<IQSummaryEventArgs>(iqFeed_IQSummaryMessage);
+                iqFeed.IQUpdateMessage += new EventHandler<IQSummaryEventArgs>(iqFeed_IQUpdateMessage);
+                iqFeed.IQTimeMessage += new EventHandler<IQTimeEventArgs>(iqFeed_IQTimeMessage);
+                iqFeed.Disconnected += iqFeed_Disconnected;
 
-				//for (int index = 0; index < 100; index++)
-				//{
-				//    Application.DoEvents();
-				//    if (connectDone.WaitOne(100, false))
-				//    {
-				//        break;
-				//    }
-				//}
-			}
-			else
-			{
-				lastError = "Unable to connect.";
-				success = false;
-			}
+                //for (int index = 0; index < 100; index++)
+                //{
+                //    Application.DoEvents();
+                //    if (connectDone.WaitOne(100, false))
+                //    {
+                //        break;
+                //    }
+                //}
+            }
+            else
+            {
+                lastError = "Unable to connect.";
+                success = false;
+            }
 
-			return success;
-		}
+            return success;
+        }
+
+        void iqFeed_Disconnected(Exception ex)
+        {
+            _logger.Warning("Disconnected: {Exception}", ex);
+            
+            connected = false;
+
+            var args = new ServiceEventArgs();
+            args.EventType = ServiceEventType.Disconnected;
+            args.Message = ex.Message;
+
+            RaiseServiceEvent(args);
+
+        }
+
+        private void RaiseServiceEvent(ServiceEventArgs args)
+        {
+            var eventHandler = ServiceEvent;
+            if (eventHandler != null)
+            {
+                eventHandler(this, args);
+            }
+        }
+
 	}
 }

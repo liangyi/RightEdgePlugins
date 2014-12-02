@@ -17,6 +17,11 @@ using System.Globalization;
 namespace IQFeed
 {
 	internal delegate void iqFeedCallBack(int value1, int value2);
+	public sealed class Win32Helper
+	{
+		[DllImport("User32.dll", SetLastError = true, EntryPoint = "FindWindowA")]
+		public extern static int FindWindow(String lpClassName, String lpWindowName);
+	}
 
 	internal class IQFeedConnect : IDisposable
 	{
@@ -35,12 +40,12 @@ namespace IQFeed
 
 		int clientId;
 
-		[DllImport("IQ32.dll")]
-		public static extern void SetCallbackFunction(iqFeedCallBack callback);
-		[DllImport("IQ32.dll")]
-		public static extern int RegisterClientApp(int client, string product, string prodKey, string versions);
-		[DllImport("IQ32.dll")]
-		public static extern void RemoveClientApp(int client);
+		//[DllImport("IQ32.dll")]
+		//public static extern void SetCallbackFunction(iqFeedCallBack callback);
+		//[DllImport("IQ32.dll")]
+		//public static extern int RegisterClientApp(int client, string product, string prodKey, string versions);
+		//[DllImport("IQ32.dll")]
+		//public static extern void RemoveClientApp(int client);
 
 
 		private IQFeedConnect()
@@ -50,56 +55,124 @@ namespace IQFeed
 			strVersion = info.FileVersion;
 		}
 
-		public void Connect()
+		public void Connect(string login, string password)
 		{
-			if (!_initialized)
-			{
-				_myCallBack = new iqFeedCallBack(iqFeedCallBackHandler);
-				SetCallbackFunction(_myCallBack);
-			}
+			//if (!_initialized)
+			//{
+			//    _myCallBack = new iqFeedCallBack(iqFeedCallBackHandler);
+			//    SetCallbackFunction(_myCallBack);
+			//}
 
-			_registerDone.Reset();
-			int ret = RegisterClientApp(clientId, IQFeedConnectInfo.ProductName, IQFeedConnectInfo.Key, strVersion);
-			while (!_registerDone.WaitOne(50, true))
+			//_registerDone.Reset();
+			//int ret = RegisterClientApp(clientId, IQFeedConnectInfo.ProductName, IQFeedConnectInfo.Key, strVersion);
+			//while (!_registerDone.WaitOne(50, true))
+			//{
+			//    //System.Windows.Forms.Application.DoEvents();
+			//}
+			int con = Win32Helper.FindWindow(null, "IQ Connection Manager");
+			int retries = 0;
+			IQFeedStatus = IQFeedStatusTypes.Uninitialized;
+
+			if (con > 0)
 			{
-				//System.Windows.Forms.Application.DoEvents();
+				IQFeedStatus = IQFeedStatusTypes.ConnectionOK;
+			}
+			else
+			{
+                //string arguments = string.Format("-product {0} -version {1} -login {2} -password {3} -autoconnect", IQFeedConnectInfo.ProductName, IQFeedConnectInfo.Key, login, password);
+                string arguments = string.Format("-product {0} -version {1}", IQFeedConnectInfo.ProductName, IQFeedConnectInfo.Key);
+                if (!string.IsNullOrEmpty(login))
+                {
+                    arguments += " -login " + login;
+                }
+                if (!string.IsNullOrEmpty(password))
+                {
+                    arguments += " -password " + password;
+                }
+                arguments += " -autoconnect";
+
+				var process = System.Diagnostics.Process.Start("IQConnect.exe", arguments);
+				process.WaitForInputIdle();
+
+				while (IQFeedStatus != IQFeedStatusTypes.ConnectionOK && retries < 10)
+				{
+					// Now try and connect
+					if (TrySocketConnect())
+					{
+						IQFeedStatus = IQFeedStatusTypes.ConnectionOK;
+					}
+					else
+					{
+						Thread.Sleep(500);
+						retries++;
+					}
+				}
 			}
 		}
 
 		private void iqFeedCallBackHandler(int value1, int value2)
 		{
-			switch (value1)
-			{
-				case 0:
-					if (value2 == 0)
-					{
-						IQFeedStatus = IQFeedStatusTypes.ConnectionOK;
-					}
-					else if (value2 == 1)
-					{
-						IQFeedStatus = IQFeedStatusTypes.LoginFailed;
-					}
-					break;
+			//switch (value1)
+			//{
+			//    case 0:
+			//        if (value2 == 0)
+			//        {
+			//            IQFeedStatus = IQFeedStatusTypes.ConnectionOK;
+			//        }
+			//        else if (value2 == 1)
+			//        {
+			//            IQFeedStatus = IQFeedStatusTypes.LoginFailed;
+			//        }
+			//        break;
 
-				case 1:
-					if (value2 == 0)
-					{
-						IQFeedStatus = IQFeedStatusTypes.Offline;
-					}
-					else if (value2 == 1)
-					{
-						IQFeedStatus = IQFeedStatusTypes.Terminating;
-					}
-					break;
+			//    case 1:
+			//        if (value2 == 0)
+			//        {
+			//            IQFeedStatus = IQFeedStatusTypes.Offline;
+			//        }
+			//        else if (value2 == 1)
+			//        {
+			//            IQFeedStatus = IQFeedStatusTypes.Terminating;
+			//        }
+			//        break;
+			//}
+			//_registerDone.Set();
+		}
+
+		bool TrySocketConnect()
+		{
+			bool connected = false;
+			try
+			{
+				Socket socket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+				int port = IQFeed.GetPort();
+				System.Net.IPAddress ipAdd = System.Net.IPAddress.Parse("127.0.0.1");
+
+				IPEndPoint endPoint = new IPEndPoint(ipAdd, port);
+
+				// Connect to the remote endpoint.
+				socket.Connect(endPoint);
+
+				if (socket.Connected)
+				{
+					connected = true;
+				}
+
+				socket.Close();
 			}
-			_registerDone.Set();
+			catch (Exception exception)
+			{
+				connected = false;
+			}
+
+			return connected;
 		}
 
 		#region IDisposable Members
 
 		public void Dispose()
 		{
-			RemoveClientApp(clientId);
+			//RemoveClientApp(clientId);
 		}
 
 		#endregion
@@ -139,6 +212,13 @@ namespace IQFeed
 		public event EventHandler<IQSummaryEventArgs> IQUpdateMessage;
 		public event EventHandler<IQSummaryEventArgs> IQSummaryMessage;
 		public event EventHandler<IQTimeEventArgs> IQTimeMessage;
+        public event Action<Exception> Disconnected;
+
+		private enum SymbolUsage
+		{
+			Historical,
+			Live
+		}
 
 		//private IQFeedStatusTypes iqFeedStatus;
 		//public IQFeedStatusTypes IQFeedStatus
@@ -169,12 +249,12 @@ namespace IQFeed
 		//    }
 		//}
 
-		public bool Connect()
+		public bool Connect(string login, string password)
 		{
 			//IQFeedConnect.SetCallbackFunction(new iqFeedCallBack(iqFeedCallBackHandler));
 			//int ret = IQFeedConnect.RegisterClientApp(clientId, strName, strKey, strVersion);
 
-			IQFeedConnect.Instance.Connect();
+			IQFeedConnect.Instance.Connect(login, password);
 			if (IQFeedConnect.Instance.IQFeedStatus != IQFeedStatusTypes.ConnectionOK)
 			{
 				return false;
@@ -220,7 +300,8 @@ namespace IQFeed
 					}
 				}
 
-				IQFeedConnect.RemoveClientApp(clientId);
+				//IQFeedConnect.RemoveClientApp(clientId);
+                connected = false;
 			}
 
 			return true;
@@ -236,7 +317,11 @@ namespace IQFeed
 
 			// Connect to the remote endpoint.
 			clientSocket.Connect(endPoint);
-			new SocketReader(clientSocket) { Callback = ReceiveCallback }.Begin();
+            new SocketReader(clientSocket)
+            {
+                Callback = ReceiveCallback,
+                ExceptionCallback = SocketExceptionCallback
+            }.Begin();
 		}
 
 		public string SymbolSubscribe(Symbol symbol)
@@ -251,7 +336,7 @@ namespace IQFeed
 				RealtimeSocketConnect();
 			}
 
-			string symbolName = FormatSymbol(symbol);
+			string symbolName = FormatSymbol(symbol, SymbolUsage.Live);
 
 			string request = "w" + symbolName + "\r\n";
 			byte[] bytes = GetBytes(request);
@@ -273,7 +358,7 @@ namespace IQFeed
 				RealtimeSocketConnect();
 			}
 
-			string symbolName = FormatSymbol(symbol);
+			string symbolName = FormatSymbol(symbol, SymbolUsage.Live);
 
 			string request = "r" + symbolName + "\r\n";
 			byte[] bytes = GetBytes(request);
@@ -420,7 +505,7 @@ namespace IQFeed
 			endDate = DateTime.Now.Date.AddDays(2);
 
 			TimeSpan ts = endDate - startDate;
-			string symbolName = FormatSymbol(symbol);
+			string symbolName = FormatSymbol(symbol, SymbolUsage.Historical);
 
             //  IQFeed updated their api, we should update to the new protocol at some point
             //  HM -> HID
@@ -443,7 +528,7 @@ namespace IQFeed
 			else if (frequency == 43200)
 			{
 				int months = Months(startDate, endDate);
-				_histRequest = "HN" + symbolName + "," + months.ToString();
+				_histRequest = "HN," + symbolName + "," + months.ToString();
 			}
 			else
 			{
@@ -469,11 +554,26 @@ namespace IQFeed
 			return historicalBars;
 		}
 
-		private string FormatSymbol(Symbol symbol)
+		private string FormatSymbol(Symbol symbol, SymbolUsage symbolUsage)
 		{
 			// See this page for some clues on how to format futures symbols for IQFeed.
 			// http://www.iqfeed.net/symbolguide/index.cfm?symbolguide=guide&displayaction=support&section=guide&web=iqfeed&guide=commod&web=IQFeed&symbolguide=guide&displayaction=support&section=guide&type=cme
 			string symbolString = "";
+
+			string customSymbolData;
+			if (symbolUsage == SymbolUsage.Historical)
+			{
+				customSymbolData = symbol.SymbolInformation.CustomHistoricalData;
+			}
+			else
+			{
+				customSymbolData = symbol.SymbolInformation.CustomLiveData;
+			}
+
+			if (!string.IsNullOrEmpty(customSymbolData))
+			{
+				return customSymbolData;
+			}
 
 			if (symbol.AssetClass == AssetClass.Future)
 			{
@@ -643,7 +743,7 @@ namespace IQFeed
 			{
 				months++;
 				incMonth = incMonth.AddMonths(1);
-			} while (startDate < endDate);
+			} while (incMonth < endDate);
 
 			return months;
 		}
@@ -697,7 +797,7 @@ namespace IQFeed
 			return port;
 		}
 
-		private int GetPort()
+		public static int GetPort()
 		{
 			int port = 5009;
 
@@ -835,6 +935,15 @@ namespace IQFeed
 				return false;
 			}
 		}
+
+        void SocketExceptionCallback(Exception ex)
+        {
+            Disconnect();
+            if (Disconnected != null)
+            {
+                Disconnected(ex);
+            }
+        }
 
 		private bool ReceiveCallback(string s)
 		{
